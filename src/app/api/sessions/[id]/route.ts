@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 
-const SESSIONS_DIR = path.join(process.cwd(), 'data', 'sessions');
+const DATA_DIR = path.join(process.cwd(), 'data');
+const PUBLICATIONS_DIR = path.join(DATA_DIR, 'publications');
 
 interface ChatSession {
   id: string;
@@ -19,9 +20,35 @@ interface SessionsIndex {
   lastUpdated: string;
 }
 
-// Lade den Sessions-Index
-async function loadSessionsIndex(): Promise<SessionsIndex> {
-  const indexPath = path.join(SESSIONS_DIR, 'index.json');
+// Finde Session-Datei durch alle Publikationen
+async function findSessionFile(sessionId: string): Promise<{sessionPath: string, publicationId: string} | null> {
+  try {
+    const publications = await fs.readdir(PUBLICATIONS_DIR);
+    
+    for (const publicationId of publications) {
+      if (publicationId === 'index.json') continue;
+      
+      const sessionsDir = path.join(PUBLICATIONS_DIR, publicationId, 'sessions');
+      const sessionPath = path.join(sessionsDir, `${sessionId}.json`);
+      
+      try {
+        await fs.access(sessionPath);
+        return { sessionPath, publicationId };
+      } catch {
+        continue;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Fehler beim Suchen der Session-Datei:', error);
+    return null;
+  }
+}
+
+// Lade den Sessions-Index für eine Publikation
+async function loadSessionsIndex(publicationId: string): Promise<SessionsIndex> {
+  const indexPath = path.join(PUBLICATIONS_DIR, publicationId, 'sessions', 'index.json');
   
   try {
     const content = await fs.readFile(indexPath, 'utf-8');
@@ -34,9 +61,9 @@ async function loadSessionsIndex(): Promise<SessionsIndex> {
   }
 }
 
-// Speichere den Sessions-Index
-async function saveSessionsIndex(index: SessionsIndex) {
-  const indexPath = path.join(SESSIONS_DIR, 'index.json');
+// Speichere den Sessions-Index für eine Publikation
+async function saveSessionsIndex(publicationId: string, index: SessionsIndex) {
+  const indexPath = path.join(PUBLICATIONS_DIR, publicationId, 'sessions', 'index.json');
   index.lastUpdated = new Date().toISOString();
   await fs.writeFile(indexPath, JSON.stringify(index, null, 2), 'utf-8');
 }
@@ -54,8 +81,13 @@ export async function PATCH(
       return NextResponse.json({ error: 'Gültiger Name ist erforderlich' }, { status: 400 });
     }
     
-    // Lade Session-Datei
-    const sessionPath = path.join(SESSIONS_DIR, `${id}.json`);
+    // Finde Session
+    const result = await findSessionFile(id);
+    if (!result) {
+      return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+    }
+    
+    const { sessionPath, publicationId } = result;
     
     try {
       const sessionContent = await fs.readFile(sessionPath, 'utf-8');
@@ -69,13 +101,13 @@ export async function PATCH(
       await fs.writeFile(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
       
       // Aktualisiere Index
-      const index = await loadSessionsIndex();
+      const index = await loadSessionsIndex(publicationId);
       const sessionIndex = index.sessions.findIndex(s => s.id === id);
       
       if (sessionIndex >= 0) {
         index.sessions[sessionIndex].name = name.trim();
         index.sessions[sessionIndex].lastUpdated = session.lastUpdated;
-        await saveSessionsIndex(index);
+        await saveSessionsIndex(publicationId, index);
       }
       
       return NextResponse.json({ success: true, session });
@@ -96,9 +128,15 @@ export async function DELETE(
   try {
     const { id } = params;
     
-    // Lösche Session-Datei
-    const sessionPath = path.join(SESSIONS_DIR, `${id}.json`);
+    // Finde Session
+    const result = await findSessionFile(id);
+    if (!result) {
+      return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+    }
     
+    const { sessionPath, publicationId } = result;
+    
+    // Lösche Session-Datei
     try {
       await fs.unlink(sessionPath);
     } catch {
@@ -106,9 +144,9 @@ export async function DELETE(
     }
     
     // Entferne aus Index
-    const index = await loadSessionsIndex();
+    const index = await loadSessionsIndex(publicationId);
     index.sessions = index.sessions.filter(s => s.id !== id);
-    await saveSessionsIndex(index);
+    await saveSessionsIndex(publicationId, index);
     
     return NextResponse.json({ success: true });
   } catch (error) {

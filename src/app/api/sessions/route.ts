@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 
-const SESSIONS_DIR = path.join(process.cwd(), 'data', 'sessions');
+const DATA_DIR = path.join(process.cwd(), 'data');
 
 interface Message {
   id: string;
@@ -15,6 +15,7 @@ interface ChatSession {
   id: string;
   name: string;
   mode: 'brainstorming' | 'writing';
+  model?: string;
   messages: Message[];
   createdAt: string;
   lastUpdated: string;
@@ -27,17 +28,20 @@ interface SessionsIndex {
 }
 
 // Stelle sicher, dass das Verzeichnis existiert
-async function ensureSessionsDir() {
+async function ensureSessionsDir(publicationId: string) {
+  const sessionsDir = path.join(DATA_DIR, 'publications', publicationId, 'sessions');
   try {
-    await fs.access(SESSIONS_DIR);
+    await fs.access(sessionsDir);
   } catch {
-    await fs.mkdir(SESSIONS_DIR, { recursive: true });
+    await fs.mkdir(sessionsDir, { recursive: true });
   }
+  return sessionsDir;
 }
 
 // Lade den Sessions-Index
-async function loadSessionsIndex(): Promise<SessionsIndex> {
-  const indexPath = path.join(SESSIONS_DIR, 'index.json');
+async function loadSessionsIndex(publicationId: string): Promise<SessionsIndex> {
+  const sessionsDir = await ensureSessionsDir(publicationId);
+  const indexPath = path.join(sessionsDir, 'index.json');
   
   try {
     const content = await fs.readFile(indexPath, 'utf-8');
@@ -53,15 +57,17 @@ async function loadSessionsIndex(): Promise<SessionsIndex> {
 }
 
 // Speichere den Sessions-Index
-async function saveSessionsIndex(index: SessionsIndex) {
-  const indexPath = path.join(SESSIONS_DIR, 'index.json');
+async function saveSessionsIndex(publicationId: string, index: SessionsIndex) {
+  const sessionsDir = await ensureSessionsDir(publicationId);
+  const indexPath = path.join(sessionsDir, 'index.json');
   index.lastUpdated = new Date().toISOString();
   await fs.writeFile(indexPath, JSON.stringify(index, null, 2), 'utf-8');
 }
 
 // Lade eine einzelne Session
-async function loadSession(sessionId: string): Promise<ChatSession | null> {
-  const sessionPath = path.join(SESSIONS_DIR, `${sessionId}.json`);
+async function loadSession(publicationId: string, sessionId: string): Promise<ChatSession | null> {
+  const sessionsDir = await ensureSessionsDir(publicationId);
+  const sessionPath = path.join(sessionsDir, `${sessionId}.json`);
   
   try {
     const content = await fs.readFile(sessionPath, 'utf-8');
@@ -78,9 +84,9 @@ async function loadSession(sessionId: string): Promise<ChatSession | null> {
 }
 
 // Speichere eine Session
-async function saveSession(session: ChatSession) {
-  await ensureSessionsDir();
-  const sessionPath = path.join(SESSIONS_DIR, `${session.id}.json`);
+async function saveSession(publicationId: string, session: ChatSession) {
+  const sessionsDir = await ensureSessionsDir(publicationId);
+  const sessionPath = path.join(sessionsDir, `${session.id}.json`);
   
   session.lastUpdated = new Date().toISOString();
   session.messageCount = session.messages.length;
@@ -88,7 +94,7 @@ async function saveSession(session: ChatSession) {
   await fs.writeFile(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
   
   // Aktualisiere den Index
-  const index = await loadSessionsIndex();
+  const index = await loadSessionsIndex(publicationId);
   const existingIndex = index.sessions.findIndex(s => s.id === session.id);
   
   const sessionSummary: ChatSession = {
@@ -102,28 +108,52 @@ async function saveSession(session: ChatSession) {
     index.sessions.push(sessionSummary);
   }
   
-  await saveSessionsIndex(index);
+  await saveSessionsIndex(publicationId, index);
 }
 
 // GET: Alle Sessions auflisten oder eine spezifische Session laden
 export async function GET(request: NextRequest) {
   try {
-    await ensureSessionsDir();
-    
     const { searchParams } = new URL(request.url);
     const sessionId = searchParams.get('id');
     const mode = searchParams.get('mode');
+    const publicationId = searchParams.get('publicationId');
+    
+    if (!publicationId && !sessionId) {
+      return NextResponse.json({ error: 'publicationId ist erforderlich' }, { status: 400 });
+    }
     
     if (sessionId) {
-      // Lade spezifische Session
-      const session = await loadSession(sessionId);
-      if (!session) {
-        return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+      // Wenn sessionId angegeben ist, suche durch alle Publikationen
+      if (publicationId) {
+        const session = await loadSession(publicationId, sessionId);
+        if (!session) {
+          return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+        }
+        return NextResponse.json(session);
+      } else {
+        // Suche durch alle Publikationen
+        const publicationsDir = path.join(DATA_DIR, 'publications');
+        try {
+          const publications = await fs.readdir(publicationsDir);
+          
+          for (const pubId of publications) {
+            if (pubId === 'index.json') continue;
+            
+            const session = await loadSession(pubId, sessionId);
+            if (session) {
+              return NextResponse.json(session);
+            }
+          }
+          
+          return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+        } catch {
+          return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
+        }
       }
-      return NextResponse.json(session);
     } else {
-      // Lade Sessions-Liste
-      const index = await loadSessionsIndex();
+      // Lade Sessions-Liste für eine Publikation
+      const index = await loadSessionsIndex(publicationId!);
       let sessions = index.sessions;
       
       // Filtere nach Modus wenn angegeben
@@ -145,13 +175,15 @@ export async function GET(request: NextRequest) {
 // POST: Neue Session erstellen oder bestehende aktualisieren
 export async function POST(request: NextRequest) {
   try {
-    await ensureSessionsDir();
+    const { name, mode, messages, sessionId, publicationId, model } = await request.json();
     
-    const { name, mode, messages, sessionId } = await request.json();
+    if (!publicationId) {
+      return NextResponse.json({ error: 'publicationId ist erforderlich' }, { status: 400 });
+    }
     
     if (sessionId) {
       // Aktualisiere bestehende Session
-      const existingSession = await loadSession(sessionId);
+      const existingSession = await loadSession(publicationId, sessionId);
       if (!existingSession) {
         return NextResponse.json({ error: 'Session nicht gefunden' }, { status: 404 });
       }
@@ -160,10 +192,11 @@ export async function POST(request: NextRequest) {
         ...existingSession,
         name: name || existingSession.name,
         messages: messages || existingSession.messages,
-        mode: mode || existingSession.mode, // Verwende bestehenden Modus falls nicht angegeben
+        mode: mode || existingSession.mode,
+        model: model !== undefined ? model : existingSession.model,
       };
       
-      await saveSession(updatedSession);
+      await saveSession(publicationId, updatedSession);
       return NextResponse.json({ success: true, session: updatedSession });
     } else {
       // Erstelle neue Session
@@ -179,13 +212,14 @@ export async function POST(request: NextRequest) {
         id: Date.now().toString(),
         name,
         mode,
+        model: model || 'anthropic/claude-3.5-sonnet:beta', // Standard-Modell
         messages: messages || [],
         createdAt: new Date().toISOString(),
         lastUpdated: new Date().toISOString(),
         messageCount: (messages || []).length,
       };
       
-      await saveSession(newSession);
+      await saveSession(publicationId, newSession);
       return NextResponse.json({ success: true, session: newSession });
     }
   } catch (error) {

@@ -3,7 +3,36 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 
-const CONTEXT_DIR = path.join(process.cwd(), 'data', 'context');
+const DATA_DIR = path.join(process.cwd(), 'data');
+const PUBLICATIONS_DIR = path.join(DATA_DIR, 'publications');
+
+async function findContextFile(id: string): Promise<string | null> {
+  try {
+    // Suche durch alle Publikationen
+    const publications = await fs.readdir(PUBLICATIONS_DIR);
+    
+    for (const publicationId of publications) {
+      if (publicationId === 'index.json') continue;
+      
+      const contextDir = path.join(PUBLICATIONS_DIR, publicationId, 'context');
+      const fileName = `${id}.md`;
+      const filePath = path.join(contextDir, fileName);
+      
+      try {
+        await fs.access(filePath);
+        return filePath;
+      } catch {
+        // Datei nicht in dieser Publikation, weiter suchen
+        continue;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Fehler beim Suchen der Context-Datei:', error);
+    return null;
+  }
+}
 
 export async function PATCH(
   request: NextRequest,
@@ -11,13 +40,9 @@ export async function PATCH(
 ) {
   try {
     const { id } = params;
-    const fileName = `${id}.md`;
-    const filePath = path.join(CONTEXT_DIR, fileName);
+    const filePath = await findContextFile(id);
 
-    // Prüfe ob Datei existiert
-    try {
-      await fs.access(filePath);
-    } catch {
+    if (!filePath) {
       return NextResponse.json({ error: 'Datei nicht gefunden' }, { status: 404 });
     }
 
@@ -54,13 +79,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = params;
-    const fileName = `${id}.md`;
-    const filePath = path.join(CONTEXT_DIR, fileName);
+    const filePath = await findContextFile(id);
 
-    // Prüfe ob Datei existiert
-    try {
-      await fs.access(filePath);
-    } catch {
+    if (!filePath) {
       return NextResponse.json({ error: 'Datei nicht gefunden' }, { status: 404 });
     }
 

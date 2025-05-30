@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Story Buddy - Dein serieller Geschichtenerzähler",
+  title: "Storybuddy - Dein Partner für die Entwicklung von großartigen Geschichten",
   description: "Ein KI-gestützter Buddy zum Erstellen serieller Geschichten mit Kontext-Management",
 };
 

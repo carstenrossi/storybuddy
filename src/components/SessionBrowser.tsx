@@ -17,6 +17,7 @@ interface ChatSession {
 interface SessionBrowserProps {
   currentMode: Mode;
   currentSessionId: string | null;
+  currentPublicationId: string | null;
   onSessionSelect: (sessionId: string) => void;
   onNewSession: () => void;
   sessionUpdateTrigger?: number;
@@ -25,6 +26,7 @@ interface SessionBrowserProps {
 export default function SessionBrowser({ 
   currentMode, 
   currentSessionId, 
+  currentPublicationId,
   onSessionSelect, 
   onNewSession,
   sessionUpdateTrigger
@@ -37,31 +39,68 @@ export default function SessionBrowser({
   const [newSessionName, setNewSessionName] = useState('');
 
   useEffect(() => {
-    loadSessions();
-  }, [currentMode]);
+    // Setze alle States zurück beim Modus- oder Publikationswechsel
+    setEditingId(null);
+    setEditName('');
+    setShowCreateDialog(false);
+    setNewSessionName('');
+
+    if (currentPublicationId) {
+      loadSessions();
+    } else {
+      setSessions([]);
+      setIsLoading(false);
+    }
+  }, [currentMode, currentPublicationId]);
 
   // Trigger Session-Reload wenn sessionUpdateTrigger sich ändert
   useEffect(() => {
-    loadSessions();
+    if (currentPublicationId) {
+      loadSessions();
+    }
   }, [sessionUpdateTrigger]);
 
   const loadSessions = async () => {
+    if (!currentPublicationId) {
+      setSessions([]);
+      setIsLoading(false);
+      return;
+    }
+
+    const publicationIdAtStart = currentPublicationId;
+
     try {
       setIsLoading(true);
-      const response = await fetch(`/api/sessions?mode=${currentMode}`);
+      
+      const response = await fetch(`/api/sessions?mode=${currentMode}&publicationId=${currentPublicationId}`);
+      
+      // Race-Condition-Check: Nur setzen wenn Publikation nicht gewechselt hat
+      if (publicationIdAtStart !== currentPublicationId) {
+        return;
+      }
+      
       if (response.ok) {
         const data = await response.json();
         setSessions(data.sessions || []);
+      } else {
+        setSessions([]);
       }
     } catch (error) {
       console.error('Fehler beim Laden der Sessions:', error);
+      // Nur bei Fehler leeren wenn noch die gleiche Publikation
+      if (publicationIdAtStart === currentPublicationId) {
+        setSessions([]);
+      }
     } finally {
-      setIsLoading(false);
+      // Nur Loading-State setzen wenn noch die gleiche Publikation
+      if (publicationIdAtStart === currentPublicationId) {
+        setIsLoading(false);
+      }
     }
   };
 
   const createNewSession = async () => {
-    if (!newSessionName.trim()) return;
+    if (!newSessionName.trim() || !currentPublicationId) return;
 
     try {
       const response = await fetch('/api/sessions', {
@@ -71,6 +110,7 @@ export default function SessionBrowser({
           name: newSessionName.trim(),
           mode: currentMode,
           messages: [],
+          publicationId: currentPublicationId,
         }),
       });
 
@@ -160,8 +200,13 @@ export default function SessionBrowser({
           </div>
           <button
             onClick={() => setShowCreateDialog(true)}
-            className="p-2 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
-            title="Neue Session erstellen"
+            disabled={!currentPublicationId}
+            className={`p-2 transition-colors ${
+              currentPublicationId
+                ? 'text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300'
+                : 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
+            }`}
+            title={currentPublicationId ? "Neue Session erstellen" : "Wählen Sie zuerst eine Publikation aus"}
           >
             <Plus className="h-5 w-5" />
           </button>
@@ -170,7 +215,13 @@ export default function SessionBrowser({
 
       {/* Sessions Liste */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {isLoading ? (
+        {!currentPublicationId ? (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
+            <p className="text-sm">Keine Publikation ausgewählt</p>
+            <p className="text-xs mt-1">Wählen Sie zuerst eine Publikation aus</p>
+          </div>
+        ) : isLoading ? (
           <div className="text-center py-8 text-gray-500 dark:text-gray-400">
             <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50 animate-pulse" />
             <p className="text-sm">Lade Sessions...</p>

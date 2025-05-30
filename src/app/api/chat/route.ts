@@ -2,13 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+const openai = new OpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY || '',
+  baseURL: 'https://openrouter.ai/api/v1',
+  defaultHeaders: {
+    'HTTP-Referer': 'https://storybuddy.app',
+    'X-Title': 'Storybuddy',
+  },
 });
-
-const CONTEXT_DIR = path.join(process.cwd(), 'data', 'context');
 
 interface Message {
   id: string;
@@ -17,16 +20,17 @@ interface Message {
   timestamp: Date;
 }
 
-// Lade alle Kontext-Dateien
-async function loadContextFiles() {
+// Lade alle Kontext-Dateien für eine spezifische Publikation
+async function loadContextFiles(publicationId: string) {
   try {
-    await fs.access(CONTEXT_DIR);
-    const files = await fs.readdir(CONTEXT_DIR);
+    const contextDir = path.join(process.cwd(), 'data', 'publications', publicationId, 'context');
+    await fs.access(contextDir);
+    const files = await fs.readdir(contextDir);
     const contextFiles = [];
 
     for (const file of files) {
       if (file.endsWith('.md')) {
-        const filePath = path.join(CONTEXT_DIR, file);
+        const filePath = path.join(contextDir, file);
         const content = await fs.readFile(filePath, 'utf-8');
         const { data, content: markdownContent } = matter(content);
 
@@ -141,69 +145,72 @@ WICHTIG: Nutze die obigen Kontext-Informationen, um konsistente und zusammenhän
 
 export async function POST(request: NextRequest) {
   try {
-    const { message, mode, systemPrompt, conversationHistory } = await request.json();
+    const { message, mode, systemPrompt, publicationId, conversationHistory, model } = await request.json();
 
-    if (!process.env.ANTHROPIC_API_KEY) {
+    if (!process.env.OPENROUTER_API_KEY) {
       return NextResponse.json(
-        { error: 'API-Schlüssel nicht konfiguriert. Bitte setzen Sie ANTHROPIC_API_KEY als Umgebungsvariable.' },
+        { error: 'API-Schlüssel nicht konfiguriert. Bitte setzen Sie OPENROUTER_API_KEY als Umgebungsvariable.' },
         { status: 500 }
       );
     }
 
-    if (!message || !mode) {
-      return NextResponse.json({ error: 'Nachricht und Modus sind erforderlich' }, { status: 400 });
+    if (!message || !mode || !publicationId) {
+      return NextResponse.json({ error: 'Nachricht, Modus und PublikationId sind erforderlich' }, { status: 400 });
     }
 
-    // Lade Kontext-Dateien
-    const contextFiles = await loadContextFiles();
+    // Lade Kontext-Dateien für die spezifische Publikation
+    const contextFiles = await loadContextFiles(publicationId);
     const contextString = buildContextString(contextFiles);
 
     // Baue System-Prompt
-    const finalSystemPrompt = buildSystemPrompt(mode, contextString, systemPrompt);
+    const finalSystemPrompt = buildSystemPrompt(mode, systemPrompt, contextString);
 
-    // Konvertiere Konversationshistorie für Claude
+    // Konvertiere Konversationshistorie für OpenAI
     const messages = [
+      {
+        role: 'system' as const,
+        content: finalSystemPrompt,
+      },
       ...(conversationHistory || []).map((msg: Message) => ({
-        role: msg.role === 'user' ? 'user' : 'assistant',
+        role: msg.role === 'user' ? 'user' as const : 'assistant' as const,
         content: msg.content,
       })),
       {
-        role: 'user',
+        role: 'user' as const,
         content: message,
       },
     ];
 
-    // Rufe Claude API auf
-    const response = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+    // Rufe OpenRouter API auf mit dem gewählten Modell
+    const response = await openai.chat.completions.create({
+      model: model || 'anthropic/claude-3.5-sonnet:beta', // Fallback auf Standard-Modell
       max_tokens: 4000,
       temperature: 0.7,
-      system: finalSystemPrompt,
-      messages: messages.slice(-10), // Begrenze auf letzte 10 Nachrichten für Kontext-Effizienz
+      messages: messages.slice(-11), // Begrenze auf letzte 10 Nachrichten + System-Prompt für Kontext-Effizienz
     });
 
-    const assistantMessage = response.content[0];
+    const assistantMessage = response.choices[0].message;
     
-    if (assistantMessage.type !== 'text') {
-      throw new Error('Unerwarteter Antworttyp von Claude');
+    if (assistantMessage.role !== 'assistant') {
+      throw new Error('Unerwarteter Antworttyp von OpenRouter');
     }
 
     return NextResponse.json({
-      response: assistantMessage.text,
+      response: assistantMessage.content,
       contextFilesCount: contextFiles.length,
     });
 
   } catch (error) {
     console.error('Fehler in Chat API:', error);
     
-    if (error instanceof Anthropic.AuthenticationError) {
+    if (error instanceof OpenAI.AuthenticationError) {
       return NextResponse.json(
         { error: 'Authentifizierungsfehler. Bitte überprüfen Sie Ihren API-Schlüssel.' },
         { status: 401 }
       );
     }
     
-    if (error instanceof Anthropic.RateLimitError) {
+    if (error instanceof OpenAI.RateLimitError) {
       return NextResponse.json(
         { error: 'Rate-Limit erreicht. Bitte versuchen Sie es später erneut.' },
         { status: 429 }

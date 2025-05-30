@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Send, Loader2, Save, Settings2, Plus, MessageSquareOff, X } from 'lucide-react';
+import ModelSelector from './ModelSelector';
 import type { Mode } from '@/app/page';
 
 interface Message {
@@ -15,6 +16,7 @@ interface ChatSession {
   id: string;
   name: string;
   mode: 'brainstorming' | 'writing';
+  model?: string;
   messages: Message[];
   createdAt: string;
   lastUpdated: string;
@@ -22,10 +24,12 @@ interface ChatSession {
 }
 
 interface ChatInterfaceProps {
-  mode: Mode;
+  mode: 'brainstorming' | 'writing';
   currentSessionId: string | null;
+  currentPublicationId: string | null;
   onNewSession: () => void;
   onSessionUpdate?: () => void;
+  onContextUpdate?: () => void;
 }
 
 // Modal für Context-Speicherung
@@ -182,7 +186,7 @@ function SaveContextModal({ isOpen, onClose, onSave, defaultContent, mode }: Sav
   );
 }
 
-export default function ChatInterface({ mode, currentSessionId, onNewSession, onSessionUpdate }: ChatInterfaceProps) {
+export default function ChatInterface({ mode, currentSessionId, currentPublicationId, onNewSession, onSessionUpdate, onContextUpdate }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -190,6 +194,7 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
   const [isEditingPrompt, setIsEditingPrompt] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [selectedMessageContent, setSelectedMessageContent] = useState('');
+  const [currentModel, setCurrentModel] = useState('anthropic/claude-3.5-sonnet:beta');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -220,6 +225,8 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
           ...msg,
           timestamp: new Date(msg.timestamp)
         })));
+        // Lade das Modell aus der Session oder setze Standard
+        setCurrentModel(session.model || 'anthropic/claude-3.5-sonnet:beta');
       }
     } catch (error) {
       console.error('Fehler beim Laden der Session:', error);
@@ -227,7 +234,7 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
   };
 
   const saveSession = async (newMessages: Message[]) => {
-    if (!currentSessionId) return;
+    if (!currentSessionId || !currentPublicationId) return;
 
     try {
       await fetch('/api/sessions', {
@@ -236,6 +243,7 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
         body: JSON.stringify({
           sessionId: currentSessionId,
           messages: newMessages,
+          publicationId: currentPublicationId,
         }),
       });
       
@@ -248,9 +256,37 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
     }
   };
 
+  const saveSessionModel = async (modelId: string) => {
+    if (!currentSessionId || !currentPublicationId) return;
+
+    try {
+      await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: currentSessionId,
+          model: modelId,
+          publicationId: currentPublicationId,
+        }),
+      });
+      
+      setCurrentModel(modelId);
+      
+      // Benachrichtige Parent über Session-Update
+      if (onSessionUpdate) {
+        onSessionUpdate();
+      }
+    } catch (error) {
+      console.error('Fehler beim Speichern des Modells:', error);
+    }
+  };
+
   const loadSystemPrompt = async () => {
     try {
-      const response = await fetch(`/api/settings/system-prompt?mode=${mode}`);
+      const url = currentPublicationId 
+        ? `/api/settings/system-prompt?mode=${mode}&publicationId=${currentPublicationId}`
+        : `/api/settings/system-prompt?mode=${mode}`;
+      const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
         setSystemPrompt(data.prompt || '');
@@ -262,10 +298,13 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
 
   const saveSystemPrompt = async () => {
     try {
+      const body = currentPublicationId 
+        ? { prompt: systemPrompt, mode, publicationId: currentPublicationId }
+        : { prompt: systemPrompt, mode };
       await fetch('/api/settings/system-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: systemPrompt, mode }),
+        body: JSON.stringify(body),
       });
       setIsEditingPrompt(false);
     } catch (error) {
@@ -274,7 +313,7 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
   };
 
   const sendMessage = async () => {
-    if (!inputMessage.trim() || isLoading || !currentSessionId) return;
+    if (!inputMessage.trim() || isLoading || !currentSessionId || !currentPublicationId) return;
 
     const newMessage: Message = {
       id: Date.now().toString(),
@@ -296,6 +335,8 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
           message: inputMessage.trim(),
           mode,
           systemPrompt: systemPrompt,
+          publicationId: currentPublicationId,
+          model: currentModel,
         }),
       });
 
@@ -327,6 +368,11 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
   };
 
   const saveAsContext = async (name: string, type: string) => {
+    if (!currentPublicationId) {
+      alert('❌ Keine Publikation ausgewählt');
+      return;
+    }
+
     try {
       const response = await fetch('/api/context', {
         method: 'POST',
@@ -335,12 +381,18 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
           name,
           type,
           content: selectedMessageContent,
+          publicationId: currentPublicationId,
         }),
       });
 
       if (response.ok) {
         // Visual feedback für erfolgreiches Speichern
         alert('✅ Als Kontext gespeichert!');
+        
+        // Benachrichtige Parent über Context-Update
+        if (onContextUpdate) {
+          onContextUpdate();
+        }
       } else {
         console.error('Fehler beim Speichern als Kontext');
         alert('❌ Fehler beim Speichern');
@@ -422,14 +474,28 @@ export default function ChatInterface({ mode, currentSessionId, onNewSession, on
             </div>
           </div>
 
-          {/* System Prompt Settings für beide Modi */}
-          <button
-            onClick={() => setIsEditingPrompt(!isEditingPrompt)}
-            className={`p-2 text-${currentModeInfo.color}-600 hover:text-${currentModeInfo.color}-700 dark:text-${currentModeInfo.color}-400 dark:hover:text-${currentModeInfo.color}-300 transition-colors`}
-            title="System-Prompt bearbeiten"
-          >
-            <Settings2 className="h-5 w-5" />
-          </button>
+          <div className="flex items-center space-x-3">
+            {/* Model Selector */}
+            <div className="flex items-center space-x-2">
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Modell:
+              </label>
+              <ModelSelector
+                selectedModel={currentModel}
+                onModelChange={saveSessionModel}
+                mode={mode}
+              />
+            </div>
+
+            {/* System Prompt Settings für beide Modi */}
+            <button
+              onClick={() => setIsEditingPrompt(!isEditingPrompt)}
+              className={`p-2 text-${currentModeInfo.color}-600 hover:text-${currentModeInfo.color}-700 dark:text-${currentModeInfo.color}-400 dark:hover:text-${currentModeInfo.color}-300 transition-colors`}
+              title="System-Prompt bearbeiten"
+            >
+              <Settings2 className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         {/* System Prompt Editor für beide Modi */}
